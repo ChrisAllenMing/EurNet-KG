@@ -56,8 +56,8 @@ class GeneralizedRelationalConv(layers.MessagePassingBase):
         else:
             relation_input = self.relation.weight.expand(batch_size, -1, -1)
         relation_input = relation_input.transpose(0, 1)
-        node_input = input[node_in]
-        edge_input = relation_input[relation]
+        node_input = input[node_in]  # [E, N, D]
+        edge_input = relation_input[relation]  # [E, N, D]
 
         if self.message_func == "transe":
             message = edge_input + node_input
@@ -71,7 +71,8 @@ class GeneralizedRelationalConv(layers.MessagePassingBase):
             message = torch.cat([message_re, message_im], dim=-1)
         else:
             raise ValueError("Unknown message function `%s`" % self.message_func)
-        message = torch.cat([message, graph.boundary])
+        # add messages for self-loops
+        message = torch.cat([message, graph.boundary])  # [|E| + |V|, N, D]
 
         return message
 
@@ -95,11 +96,11 @@ class GeneralizedRelationalConv(layers.MessagePassingBase):
             min = scatter_min(message * edge_weight, node_out, dim=0, dim_size=graph.num_node)[0]
             std = (sq_mean - mean ** 2).clamp(min=self.eps).sqrt()
             features = torch.cat([mean.unsqueeze(-1), max.unsqueeze(-1), min.unsqueeze(-1), std.unsqueeze(-1)], dim=-1)
-            features = features.flatten(-2)
+            features = features.flatten(-2)  # [|V|, N, 4D]
             scale = degree_out.log()
             scale = scale / scale.mean()
-            scales = torch.cat([torch.ones_like(scale), scale, 1 / scale.clamp(min=1e-2)], dim=-1)
-            update = (features.unsqueeze(-1) * scales.unsqueeze(-2)).flatten(-2)
+            scales = torch.cat([torch.ones_like(scale), scale, 1 / scale.clamp(min=1e-2)], dim=-1)  # [|V|, 1, 3]
+            update = (features.unsqueeze(-1) * scales.unsqueeze(-2)).flatten(-2)  # [|V|, N, 12D]
         else:
             raise ValueError("Unknown aggregation function `%s`" % self.aggregate_func)
 
@@ -158,7 +159,7 @@ class GeneralizedRelationalConv(layers.MessagePassingBase):
         return update.view(len(update), batch_size, -1)
 
     def combine(self, input, update):
-        output = self.linear(torch.cat([input, update], dim=-1))
+        output = self.linear(torch.cat([input, update], dim=-1))  # [|V|, N, D_out]
         if self.layer_norm:
             output = self.layer_norm(output)
         if self.activation:

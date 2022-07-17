@@ -95,8 +95,9 @@ class NeuralBellmanFordNetwork(nn.Module, core.Configurable):
     @utils.cached
     def bellmanford(self, graph, h_index, r_index, separate_grad=False):
         query = self.query(r_index)
-        index = h_index.unsqueeze(-1).expand_as(query)
-        boundary = torch.zeros(graph.num_node, *query.shape, device=self.device)
+        index = h_index.unsqueeze(-1).expand_as(query)  # [N, D]
+        boundary = torch.zeros(graph.num_node, *query.shape, device=self.device)  # [|V|, N, D]
+        # add query/relation embedding into the entry indexed by head entity
         boundary.scatter_add_(0, index.unsqueeze(0), query.unsqueeze(0))
         with graph.graph():
             graph.query = query
@@ -131,12 +132,17 @@ class NeuralBellmanFordNetwork(nn.Module, core.Configurable):
         }
 
     def forward(self, graph, h_index, t_index, r_index=None, all_loss=None, metric=None):
+        # remove direct links from heads to tails (or vice versa)
         if all_loss is not None:
             graph = self.remove_easy_edges(graph, h_index, t_index, r_index)
 
-        shape = h_index.shape
+        shape = h_index.shape  # training: [N, N_neg + 1]; test: [N, N_neg]
         if graph.num_relation:
             graph = graph.undirected(add_inverse=True)
+            # after this operation, each corresponding row of head, tail and relation will be (M: #negatives):
+            # head: [pos_hid, pos_hid, ..., pos_hid]
+            # tail: [pos_tid, neg_tid_1, ..., neg_tid_M]
+            # relation: [pos_rid, pos_rid, ..., pos_rid]
             h_index, t_index, r_index = self.negative_sample_to_tail(h_index, t_index, r_index)
         else:
             graph = self.as_relational_graph(graph)
@@ -147,11 +153,12 @@ class NeuralBellmanFordNetwork(nn.Module, core.Configurable):
         assert (h_index[:, [0]] == h_index).all()
         assert (r_index[:, [0]] == r_index).all()
         output = self.bellmanford(graph, h_index[:, 0], r_index[:, 0])
-        feature = output["node_feature"].transpose(0, 1)
-        index = t_index.unsqueeze(-1).expand(-1, -1, feature.shape[-1])
-        feature = feature.gather(1, index)
+        feature = output["node_feature"].transpose(0, 1)  # [N, |V|, D]
+        index = t_index.unsqueeze(-1).expand(-1, -1, feature.shape[-1])  # [N, N_neg + 1, D]
+        feature = feature.gather(1, index)  # [N, N_neg + 1, D]
 
         if self.symmetric:
+            # symmetric computation can only perform on the homogeneous graph
             assert (t_index[:, [0]] == t_index).all()
             output = self.bellmanford(graph, t_index[:, 0], r_index[:, 0])
             inv_feature = output["node_feature"].transpose(0, 1)
@@ -160,7 +167,7 @@ class NeuralBellmanFordNetwork(nn.Module, core.Configurable):
             feature = (feature + inv_feature) / 2
 
         score = self.mlp(feature).squeeze(-1)
-        return score.view(shape)
+        return score.view(shape)  # training: [N, N_neg + 1]; test: [N, N_neg]
 
     def visualize(self, graph, h_index, t_index, r_index):
         assert h_index.numel() == 1 and h_index.ndim == 1
