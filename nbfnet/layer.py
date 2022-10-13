@@ -8,6 +8,85 @@ from torchdrug import layers
 from torchdrug.layers import functional
 
 
+class GatedRelationalMessagePassing(layers.MessagePassingBase):
+
+    eps = 1e-6
+
+    message2mul = {
+        "transe": "add",
+        "distmult": "mul",
+    }
+
+    def __init__(self, input_dim, output_dim, num_relation, query_input_dim, aggregate_func="mean",
+                 layer_norm=False, activation="relu"):
+        super(GatedRelationalMessagePassing, self).__init__()
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.num_relation = num_relation
+        self.num_compute_relation = num_relation + 1  # an additional relation for boundary
+        self.query_input_dim = query_input_dim
+        self.aggregate_func = aggregate_func
+
+        if layer_norm:
+            self.layer_norm = nn.LayerNorm(output_dim)
+        else:
+            self.layer_norm = None
+        if isinstance(activation, str):
+            self.activation = getattr(F, activation)
+        else:
+            self.activation = activation
+
+        self.self_loop = nn.Linear(input_dim, output_dim)
+        self.message_linear = nn.Linear(input_dim, output_dim)
+        self.weight_linear = nn.Linear(input_dim, self.num_compute_relation)
+        self.conv = nn.Conv1d(self.num_compute_relation * output_dim, self.num_compute_relation * output_dim,
+                              kernel_size=1, groups=self.num_compute_relation * output_dim, bias=False)
+        self.gate_linear = nn.Linear(output_dim, output_dim)
+
+    def message(self, graph, input):
+        assert graph.num_relation == self.num_relation
+
+        message_input = self.message_linear(input)
+        node_in = graph.edge_list[:, 0]
+        message = message_input[node_in]  # [|E|, N, D]
+        message = torch.cat([message, graph.boundary], dim=0)  # [|E| + |V|, N, D]
+
+        return message
+
+    def aggregate(self, graph, message):
+        _, node_out, relation = graph.edge_list.t()
+        node_out = torch.cat([node_out, torch.arange(graph.num_node, device=graph.device)], dim=0)
+        relation = torch.cat([relation, torch.ones(graph.num_node, device=graph.device) * self.num_relation], dim=0)
+        node_out = node_out * self.num_relation + relation
+        edge_weight = torch.cat([graph.edge_weight, torch.ones(graph.num_node, device=graph.device)], dim=0)
+        edge_weight = edge_weight.unsqueeze(-1).unsqueeze(-1)
+
+        if self.aggregate_func == "sum":
+            update = scatter_add(message * edge_weight, node_out, dim=0, dim_size=graph.num_node * self.num_relation)
+        elif self.aggregate_func == "mean":
+            update = scatter_mean(message * edge_weight, node_out, dim=0, dim_size=graph.num_node * self.num_relation)
+        else:
+            raise ValueError("Unknown aggregation function `%s`" % self.aggregate_func)
+
+        update = update.transpose(1, 2).view(graph.num_node, self.num_relation * self.output_dim, -1)  # [|V|, |R|D, N]
+        update = self.activation(self.conv(update))
+        update = update.transpose(1, 2).view(graph.num_node, -1, self.num_relation, self.output_dim)  # [|V|, N, |R|, D]
+
+        return update
+
+    def combine(self, input, update):
+        relation_weight = self.weight_linear(input).unsqueeze(-1)  # [|V|, N, R, 1]
+        update = (update * relation_weight).sum(dim=2)  # [|V|, N, D]
+        gate = self.gate_linear(update)
+        output = self.self_loop(input) * gate
+        if self.layer_norm:
+            output = self.layer_norm(output)
+        if self.activation:
+            output = self.activation(output)
+
+        return output
+
+
 class GeneralizedRelationalConv(layers.MessagePassingBase):
 
     eps = 1e-6
