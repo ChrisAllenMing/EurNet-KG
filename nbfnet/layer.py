@@ -56,21 +56,26 @@ class GatedRelationalMessagePassing(layers.MessagePassingBase):
     def aggregate(self, graph, message):
         _, node_out, relation = graph.edge_list.t()
         node_out = torch.cat([node_out, torch.arange(graph.num_node, device=graph.device)], dim=0)
-        relation = torch.cat([relation, torch.ones(graph.num_node, device=graph.device) * self.num_relation], dim=0)
-        node_out = node_out * self.num_relation + relation
+        relation = torch.cat([relation, torch.ones(graph.num_node, dtype=torch.long,
+                                                   device=graph.device) * self.num_relation], dim=0)
+        node_out = node_out * self.num_compute_relation + relation
         edge_weight = torch.cat([graph.edge_weight, torch.ones(graph.num_node, device=graph.device)], dim=0)
         edge_weight = edge_weight.unsqueeze(-1).unsqueeze(-1)
 
         if self.aggregate_func == "sum":
-            update = scatter_add(message * edge_weight, node_out, dim=0, dim_size=graph.num_node * self.num_relation)
+            update = scatter_add(message * edge_weight, node_out, dim=0,
+                                 dim_size=graph.num_node * self.num_compute_relation)
         elif self.aggregate_func == "mean":
-            update = scatter_mean(message * edge_weight, node_out, dim=0, dim_size=graph.num_node * self.num_relation)
+            update = scatter_mean(message * edge_weight, node_out, dim=0,
+                                  dim_size=graph.num_node * self.num_compute_relation)
         else:
             raise ValueError("Unknown aggregation function `%s`" % self.aggregate_func)
 
-        update = update.transpose(1, 2).view(graph.num_node, self.num_relation * self.output_dim, -1)  # [|V|, |R|D, N]
+        update = update.transpose(1, 2).view(graph.num_node.item(),
+                                             self.num_compute_relation * self.output_dim, -1)  # [|V|, |R|D, N]
         update = self.activation(self.conv(update))
-        update = update.transpose(1, 2).view(graph.num_node, -1, self.num_relation, self.output_dim)  # [|V|, N, |R|, D]
+        update = update.transpose(1, 2).view(graph.num_node.item(),
+                                             -1, self.num_compute_relation, self.output_dim)  # [|V|, N, |R|, D]
 
         return update
 
