@@ -13,6 +13,7 @@ task:
     aggregate_func: mean
     short_cut: yes
     layer_norm: yes
+    dependent: yes
     remove_one_hop: yes
   criterion: bce
   num_negative: 32
@@ -26,7 +27,7 @@ optimizer:
 
 engine:
   gpus: {{ gpus }}
-  batch_size: 24
+  batch_size: 16
 
 train:
   num_epoch: 20

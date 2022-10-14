@@ -18,12 +18,11 @@ class GatedRelationalMessagePassing(layers.MessagePassingBase):
     }
 
     def __init__(self, input_dim, output_dim, num_relation, query_input_dim, aggregate_func="mean",
-                 layer_norm=False, activation="relu"):
+                 layer_norm=False, activation="relu", dependent=True):
         super(GatedRelationalMessagePassing, self).__init__()
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.num_relation = num_relation
-        self.num_compute_relation = num_relation + 1  # an additional relation for boundary
         self.query_input_dim = query_input_dim
         self.aggregate_func = aggregate_func
 
@@ -38,50 +37,51 @@ class GatedRelationalMessagePassing(layers.MessagePassingBase):
 
         self.self_loop = nn.Linear(input_dim, output_dim)
         self.message_linear = nn.Linear(input_dim, output_dim)
-        self.weight_linear = nn.Linear(input_dim, self.num_compute_relation)
-        self.conv = nn.Conv1d(self.num_compute_relation * output_dim, self.num_compute_relation * output_dim,
-                              kernel_size=1, groups=self.num_compute_relation * output_dim, bias=False)
+        self.weight_linear = nn.Linear(input_dim, num_relation)
         self.gate_linear = nn.Linear(output_dim, output_dim)
+        if dependent:
+            self.relation_linear = nn.Linear(query_input_dim, num_relation * output_dim)
+        else:
+            self.relation = nn.Embedding(num_relation, output_dim)
 
     def message(self, graph, input):
         assert graph.num_relation == self.num_relation
 
+        batch_size = len(graph.query)
+        node_in, node_out, relation = graph.edge_list.t()
+
         message_input = self.message_linear(input)
-        node_in = graph.edge_list[:, 0]
-        message = message_input[node_in]  # [|E|, N, D]
-        message = torch.cat([message, graph.boundary], dim=0)  # [|E| + |V|, N, D]
+        if self.dependent:
+            relation_input = self.relation_linear(graph.query).view(batch_size, self.num_relation, self.output_dim)
+        else:
+            relation_input = self.relation.weight.expand(batch_size, -1, -1)
+        relation_input = relation_input.transpose(0, 1)
+        relation_weight = self.weight_linear(input).transpose(1, 2).unsqueeze(-1)  # [V, R, N, 1]
+
+        node_input = message_input[node_in]  # [E, N, D]
+        edge_input = relation_input[relation]  # [E, N, D]
+        edge_weight = relation_weight[node_out, relation]  # [E, N, 1]
+        message = edge_input * node_input * edge_weight  # [E, N, D]
+        message = torch.cat([message, graph.boundary], dim=0)  # [E + V, N, D]
 
         return message
 
     def aggregate(self, graph, message):
-        _, node_out, relation = graph.edge_list.t()
-        node_out = torch.cat([node_out, torch.arange(graph.num_node, device=graph.device)], dim=0)
-        relation = torch.cat([relation, torch.ones(graph.num_node, dtype=torch.long,
-                                                   device=graph.device) * self.num_relation], dim=0)
-        node_out = node_out * self.num_compute_relation + relation
-        edge_weight = torch.cat([graph.edge_weight, torch.ones(graph.num_node, device=graph.device)], dim=0)
+        node_out = graph.edge_list[:, 1]
+        node_out = torch.cat([node_out, torch.arange(graph.num_node, device=graph.device)])
+        edge_weight = torch.cat([graph.edge_weight, torch.ones(graph.num_node, device=graph.device)])
         edge_weight = edge_weight.unsqueeze(-1).unsqueeze(-1)
 
         if self.aggregate_func == "sum":
-            update = scatter_add(message * edge_weight, node_out, dim=0,
-                                 dim_size=graph.num_node * self.num_compute_relation)
+            update = scatter_add(message * edge_weight, node_out, dim=0, dim_size=graph.num_node)
         elif self.aggregate_func == "mean":
-            update = scatter_mean(message * edge_weight, node_out, dim=0,
-                                  dim_size=graph.num_node * self.num_compute_relation)
+            update = scatter_mean(message * edge_weight, node_out, dim=0, dim_size=graph.num_node)
         else:
             raise ValueError("Unknown aggregation function `%s`" % self.aggregate_func)
-
-        update = update.transpose(1, 2).view(graph.num_node.item(),
-                                             self.num_compute_relation * self.output_dim, -1)  # [|V|, |R|D, N]
-        update = self.activation(self.conv(update))
-        update = update.transpose(1, 2).view(graph.num_node.item(),
-                                             -1, self.num_compute_relation, self.output_dim)  # [|V|, N, |R|, D]
 
         return update
 
     def combine(self, input, update):
-        relation_weight = self.weight_linear(input).unsqueeze(-1)  # [|V|, N, R, 1]
-        update = (update * relation_weight).sum(dim=2)  # [|V|, N, D]
         gate = self.gate_linear(update)
         output = self.self_loop(input) * gate
         if self.layer_norm:

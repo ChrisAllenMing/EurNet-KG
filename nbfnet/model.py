@@ -17,8 +17,8 @@ from . import layer
 class EurNet(nn.Module, core.Configurable):
 
     def __init__(self, input_dim, hidden_dims, num_relation=None, symmetric=False,
-                 aggregate_func="mean", short_cut=False, layer_norm=False, activation="relu",
-                 concat_hidden=False, num_mlp_layer=2, remove_one_hop=False, num_beam=10, path_topk=10):
+                 aggregate_func="mean", short_cut=False, layer_norm=False, activation="relu", concat_hidden=False,
+                 num_mlp_layer=2, dependent=True, remove_one_hop=False, num_beam=10, path_topk=10):
         super(EurNet, self).__init__()
 
         if not isinstance(hidden_dims, Sequence):
@@ -41,7 +41,7 @@ class EurNet(nn.Module, core.Configurable):
         for i in range(len(self.dims) - 1):
             self.layers.append(layer.GatedRelationalMessagePassing(self.dims[i], self.dims[i + 1], double_relation,
                                                                    self.dims[0], aggregate_func, layer_norm,
-                                                                   activation))
+                                                                   activation, dependent))
 
         feature_dim = hidden_dims[-1] * (len(hidden_dims) if concat_hidden else 1) + input_dim
         self.query = nn.Embedding(double_relation, input_dim)
