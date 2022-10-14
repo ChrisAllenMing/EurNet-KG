@@ -10,13 +10,6 @@ from torchdrug.layers import functional
 
 class GatedRelationalMessagePassing(layers.MessagePassingBase):
 
-    eps = 1e-6
-
-    message2mul = {
-        "transe": "add",
-        "distmult": "mul",
-    }
-
     def __init__(self, input_dim, output_dim, num_relation, query_input_dim, aggregate_func="mean",
                  layer_norm=False, activation="relu", dependent=True):
         super(GatedRelationalMessagePassing, self).__init__()
@@ -25,6 +18,7 @@ class GatedRelationalMessagePassing(layers.MessagePassingBase):
         self.num_relation = num_relation
         self.query_input_dim = query_input_dim
         self.aggregate_func = aggregate_func
+        self.dependent = dependent
 
         if layer_norm:
             self.layer_norm = nn.LayerNorm(output_dim)
